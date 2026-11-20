@@ -3,12 +3,19 @@
 import { fdT } from './units.js';
 export const MANIP_RAIN = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
 export const MANIP_VAR = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+export const MANIP_MOISTURE = [-20, -15, -10, -5, 0, 5, 10, 15, 20];
+export const MANIP_WIND = [0.5, 0.75, 1, 1.25, 1.5];
+export const MANIP_PRESSURE = [-10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10];
+export const MANIP_CLOUD = [-20, -15, -10, -5, 0, 5, 10, 15, 20];
 export const fmtT = (v) => (v === 0 ? fdT(0, 0) : `${v > 0 ? '+' : '−'}${fdT(Math.abs(v), 1)}`);
 export const fmtX = (v) => `×${+v.toFixed(2)}`;
+export const fmtPP = (v) => `${v > 0 ? '+' : ''}${v} pp`;
+export const fmtHpa = (v) => `${v > 0 ? '+' : ''}${v} hPa`;
 // indeks suwaka najbliższy podanej wartości
 export const nearest = (list, v) => list.reduce((b, x, i) => (Math.abs(x - v) < Math.abs(list[b] - v) ? i : b), 0);
 // parametry adresu (start ze strony tytułowej, zmiana siatki w Settings)
-export const manipQuery = (T, R, V) => (T ? `&tan=${T}` : '') + (R !== 1 ? `&rnf=${R}` : '') + (V !== 1 ? `&vrf=${V}` : '');
+export const manipQuery = (T, R, V, H = 0, W = 1, P = 0, C = 0) => (T ? `&tan=${T}` : '') + (R !== 1 ? `&rnf=${R}` : '') + (V !== 1 ? `&vrf=${V}` : '')
+  + (H ? `&rha=${H}` : '') + (W !== 1 ? `&wdf=${W}` : '') + (P ? `&pah=${P}` : '') + (C ? `&cla=${C}` : '');
 // odcinek zmiany w czasie: od wartości from w chwili t0 liniowo do to w chwili t1 [s czasu symulacji]
 export const seg = (v) => ({ from: v, to: v, t0: 0, t1: 0 });
 export const segAt = (s, t) => (t >= s.t1 ? s.to : t <= s.t0 ? s.from : s.from + (s.to - s.from) * (t - s.t0) / (s.t1 - s.t0));

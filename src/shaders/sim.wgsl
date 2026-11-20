@@ -52,6 +52,10 @@ struct Params {
   rainF: f32,        // manipulacja atmosfery: mnożnik opadu (1 – bez zmian)
   probeI: u32,       // kolumna sondy (i, j) – diagnostyka spakowana do work[W_PROBE…]
   probeJ: u32,
+  moisturePP: f32,   // tropospheric relative-humidity adjustment [percentage points]
+  windF: f32,        // synoptic wind-speed multiplier (direction unchanged)
+  pressureHpa: f32,  // synoptic pressure-system anomaly amplification [hPa]
+  cloudPP: f32,      // cloud-layer relative-humidity adjustment [percentage points]
 }
 
 // Szerokość geograficzna wiersza j [rad] (duże mapy: kilkanaście stopni różnicy N–S)
@@ -992,18 +996,34 @@ fn parAt(p: u32, X: f32, Y: f32) -> f32 {
   let j0 = wrapi(i32(yf), NGY);
   let j1 = (j0 + 1u) % NGY;
   let b = VG_PGRID + p * NGX * NGY;
-  return mix(mix(vg[b + j0 * NGX + i0], vg[b + j0 * NGX + i1], fx),
-             mix(vg[b + j1 * NGX + i0], vg[b + j1 * NGX + i1], fx), fy);
+  var v = mix(mix(vg[b + j0 * NGX + i0], vg[b + j0 * NGX + i1], fx),
+              mix(vg[b + j1 * NGX + i0], vg[b + j1 * NGX + i1], fx), fy);
+  if (p == 7u || p == 8u || p == 9u || p == 10u || p == 16u || p == 17u || p == 18u || p == 19u) {
+    v *= P.windF;
+  }
+  return v;
+}
+
+fn pressureDeltaAt(X: f32, Y: f32) -> f32 {
+  return P.pressureHpa * clamp((parAt(12u, X, Y) - 1013.25) / 10.0, -1.0, 1.0);
 }
 
 struct Air { ts: f32, gam: f32, ztr: f32, zi: f32, di: f32, rhl: f32, rhh: f32, u0: f32, v0: f32, du: f32, dv: f32, g2: f32,
               d0u: f32, d0v: f32, d3u: f32, d3v: f32, rhm: f32, r15: f32, r50: f32, r65: f32, gu: f32 }
 
 fn airAt(X: f32, Y: f32) -> Air {
-  return Air(parAt(0u, X, Y), parAt(1u, X, Y), parAt(2u, X, Y), parAt(3u, X, Y), parAt(4u, X, Y),
-             parAt(5u, X, Y), parAt(6u, X, Y), parAt(7u, X, Y), parAt(8u, X, Y), parAt(9u, X, Y), parAt(10u, X, Y),
-             parAt(15u, X, Y), parAt(16u, X, Y), parAt(17u, X, Y), parAt(18u, X, Y), parAt(19u, X, Y), parAt(20u, X, Y),
-             parAt(21u, X, Y), parAt(22u, X, Y), parAt(23u, X, Y), parAt(24u, X, Y));
+  var a = Air(parAt(0u, X, Y), parAt(1u, X, Y), parAt(2u, X, Y), parAt(3u, X, Y), parAt(4u, X, Y),
+              parAt(5u, X, Y), parAt(6u, X, Y), parAt(7u, X, Y), parAt(8u, X, Y), parAt(9u, X, Y), parAt(10u, X, Y),
+              parAt(15u, X, Y), parAt(16u, X, Y), parAt(17u, X, Y), parAt(18u, X, Y), parAt(19u, X, Y), parAt(20u, X, Y),
+              parAt(21u, X, Y), parAt(22u, X, Y), parAt(23u, X, Y), parAt(24u, X, Y));
+  let e = f32(GS);
+  let dpdx = (pressureDeltaAt(X + e, Y) - pressureDeltaAt(X - e, Y)) * 100.0 / (2.0 * e * DX);
+  let dpdy = (pressureDeltaAt(X, Y + e) - pressureDeltaAt(X, Y - e)) * 100.0 / (2.0 * e * DY);
+  let f0 = fcorAt(i32(round(Y)));
+  let f = select(min(f0, -3e-5), max(f0, 3e-5), f0 >= 0.0);
+  a.u0 += P.windF * -dpdy / (1.2 * f);
+  a.v0 += P.windF * dpdx / (1.2 * f);
+  return a;
 }
 
 // Korekta klimatu (metoda delta, main.js cc*): w węzłach co ≤ 600 km (CCNX × CCNY, bufor vg CCG) średnia różnica dane − model
@@ -1144,7 +1164,10 @@ fn tgt_build(@builtin(global_invocation_id) gid: vec3u) {
     // wilgotność docelowa: w warstwach cirrusowych (< −20 °C) najwyżej 95% nasycenia względem lodu (inaczej
     // wszędzie gruby cirrus); w cieplejszych – bez tego limitu (przy −8 °C oznaczał ≤ 87% RH względem wody,
     // więc zimą w warstwie granicznej nie mogły powstać przechłodzone stratusy – pogodne niebo i mróz)
-    var qtw = airRH(a, z) * qsat(t, vg[VG_PRS + k]);
+    let moistW = 1.0 - smoothstep(a.ztr - 2000.0, a.ztr, z);
+    let cloudW = smoothstep(1000.0, 2500.0, z) * (1.0 - smoothstep(a.ztr - 2500.0, a.ztr, z));
+    var rhU = clamp(airRH(a, z) + P.moisturePP * 0.01 * moistW + P.cloudPP * 0.01 * cloudW, 0.0, 1.05);
+    var qtw = rhU * qsat(t, vg[VG_PRS + k]);
     // Tryb synoptyczny: warstwy prawie nasycone w modelu (RH względem nasycenia woda → lód 85–97% → płynnie; front, niż, chmury
     // warstwowe zimą) nad warstwą dolną (~1.5 km, przy inwersji niżej / wyżej) – w celu nasycone jak w modelu. Profil grunt → 6.5 km
     // (względem wody) gubił nasycone warstwy frontu: jesienią i zimą domena dostawała 10–40% opadu modelu (Poznań, 20 dób: listopad
@@ -1152,7 +1175,6 @@ fn tgt_build(@builtin(global_invocation_id) gid: vec3u) {
     // swobodna troposfera modelu jest latem za wilgotna i za często prawie nasycona – w lipcu (Kraków, 8 km, 20 dób) pełny profil
     // modelu dawał CAPE 371 → 524 J/kg i opad 100 → 264 mm, same warstwy nasycone 416 J/kg i 242 mm (jak dawniej sama wilgotność
     // na 3 km – burze w górach); latem opad frontów robi domena z unoszenia dużej skali jak dotąd
-    var rhU = airRH(a, z);
     var wsat = 0.0;
     if (a.r15 > 0.0) {
       let zb = mix(1500.0, a.zi, select(0.0, clamp(a.di, 0.0, 1.0), a.zi > 0.0));
@@ -1205,7 +1227,7 @@ fn tgt_build(@builtin(global_invocation_id) gid: vec3u) {
   }
   tgt[base + 4u * N + col] = a.u0 + a.d0u;
   tgt[base + 4u * N + NXY + col] = a.v0 + a.d0v;
-  tgt[base + 4u * N + 2u * NXY + col] = parAt(12u, X, Y);
+  tgt[base + 4u * N + 2u * NXY + col] = parAt(12u, X, Y) + pressureDeltaAt(X, Y);
   tgt[base + 4u * N + 3u * NXY + col] = parAt(11u, X, Y);     // ruch pionowy dużej skali ~3 km [m/s]
   // geometria frontu (pola 4…11 przy gruncie terminu): kierunek do zimnego powietrza (2), położenie osi względem kolumny wzdłuż
   // tego kierunku [m], połowa szerokości gładkiej strefy D [m], połowa szerokości ostrego stopnia L [m], nachylenie powierzchni

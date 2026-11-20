@@ -3,7 +3,7 @@
 import { tile, demColor, lonLatToTile, tileToLonLat } from './geo.js';
 import { NICE_DX, RES_OPTS, planGrid } from './gridplan.js';
 import { openRun, stashRun, resumeUrl } from './runfile.js';
-import { MANIP_RAIN, MANIP_VAR, fmtT, fmtX, manipQuery } from './manip.js';
+import { MANIP_RAIN, MANIP_VAR, MANIP_MOISTURE, MANIP_WIND, MANIP_PRESSURE, MANIP_CLOUD, fmtT, fmtX, fmtPP, fmtHpa, manipQuery } from './manip.js';
 import { toD, fromD, unitD, fmDx, isImp, setImp, onUnits } from './units.js';
 import {
   QUALITY_MODES, loadQualityMode, saveQualityMode, detectGpuTierAsync,
@@ -57,11 +57,15 @@ for (const [id, k] of [['ttLx', 'lx'], ['ttLy', 'ly']]) {
 }
 // manipulacja atmosfery: nie zapamiętywana, każda sesja startuje od neutralnych nastaw (ustawione kiedyś +6 K zostawało potem niezauważone)
 const manT = () => +$('ttTan').value, manR = () => MANIP_RAIN[+$('ttRain').value], manV = () => MANIP_VAR[+$('ttVar').value];
+const manH = () => MANIP_MOISTURE[+$('ttMoist').value], manW = () => MANIP_WIND[+$('ttWind').value];
+const manP = () => MANIP_PRESSURE[+$('ttPressure').value], manC = () => MANIP_CLOUD[+$('ttCloud').value];
 function manUi() {
   const lab = (id, t, on) => { $(id).textContent = t; $(id).style.color = on ? '#ff9a3c' : ''; };
   lab('ttTanV', fmtT(manT()), manT() !== 0); lab('ttRainV', fmtX(manR()), manR() !== 1); lab('ttVarV', fmtX(manV()), manV() !== 1);
+  lab('ttMoistV', fmtPP(manH()), manH() !== 0); lab('ttWindV', fmtX(manW()), manW() !== 1);
+  lab('ttPressureV', fmtHpa(manP()), manP() !== 0); lab('ttCloudV', fmtPP(manC()), manC() !== 0);
 }
-for (const id of ['ttTan', 'ttRain', 'ttVar']) $(id).addEventListener('input', manUi);
+for (const id of ['ttTan', 'ttRain', 'ttVar', 'ttMoist', 'ttWind', 'ttPressure', 'ttCloud']) $(id).addEventListener('input', manUi);
 manUi();
 const fmtLL = (lat, lon) => `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? 'N' : 'S'} ${Math.abs(lon).toFixed(2)}°${lon >= 0 ? 'E' : 'W'}`;
 function ui() {
@@ -281,7 +285,7 @@ async function start(place, custom = false) {
   const nz = recommendNz(gpu.tier, g.nx, g.ny, st.quality);
   const nzQ = nz ? `&nz=${nz}` : '';
   const worldQ = custom ? '&world=1' : '';
-  history.replaceState(null, '', `${location.pathname}?dx=${g.dx}&nx=${g.nx}&ny=${g.ny}${nzQ}${worldQ}&start=${a}${manipQuery(manT(), manR(), manV())}`);
+  history.replaceState(null, '', `${location.pathname}?dx=${g.dx}&nx=${g.nx}&ny=${g.ny}${nzQ}${worldQ}&start=${a}${manipQuery(manT(), manR(), manV(), manH(), manW(), manP(), manC())}`);
   $('titleScr').classList.remove('on');
   $('loadScr').classList.add('on');
   await import('./main.js');

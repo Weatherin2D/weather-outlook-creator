@@ -6,7 +6,11 @@ import {
   WORLD_PRESETS, SYN_BASELINES, createWorld, applyPreset, paintWorld,
   packWorld, unpackWorld, worldFingerprint, peWorldSampler,
   SYN_TERRAIN_NX, SYN_TERRAIN_NY, createSynTerrain, paintSynTerrain,
+  paintSynRidge, paintSynValley, paintSynPlateau, sampleSynTerrain,
   synTerrainFingerprint, packSynTerrain, unpackSynTerrain,
+  synUndoPush, synUndoPop, SYN_UNDO_MAX,
+  exportSynTerrainPNG, exportSynTerrainJSON,
+  importSynTerrainPNG, importSynTerrainJSON,
 } from './world.js';
 import { baseClim } from './climbase.js';
 import { fetchTerrain, fetchTerrainHi, peakFine, fetchLandCover, fetchCities, cachedClimate, cachedNormals, climateOf, MONTH_DAYS, fetchNormals, worldDem, worldElev, regionDem, demColor, lonLatToTile, tileToLonLat } from './geo.js';
@@ -21,7 +25,7 @@ import { drawProfile, drawMeteogram, newView, attachView, MET_L, MET_R } from '.
 import { analyzeSounding, renderSounding } from './sounding.js';
 import { createStations } from './stations.js';
 import { toD, fromD, unitD, nD, fm, fT, fdT, fmH, fmZ, fmDx, fmVis, rnd, isImp, setImp, onUnits } from './units.js';
-import { MANIP_RAIN, MANIP_VAR, fmtT, fmtX, nearest, manipQuery, seg, segAt } from './manip.js';
+import { MANIP_RAIN, MANIP_VAR, MANIP_MOISTURE, MANIP_WIND, MANIP_PRESSURE, MANIP_CLOUD, fmtT, fmtX, fmtPP, fmtHpa, nearest, manipQuery, seg, segAt } from './manip.js';
 import { packRun, openRun, jsonPack, jsonUnpack, stashRun, stashedRun, clearStash, resumeUrl } from './runfile.js';
 import {
   QUALITY_MODES, loadQualityMode, saveQualityMode, detectGpuTierAsync, resolveQuality,
@@ -40,7 +44,7 @@ import atmoLutSrc from './shaders/atmolut.wgsl?raw';
 const SLOT = 256;           // odstęp slotów parametrów w buforze uniform (wyrównanie dynamicznego offsetu)
 const WG = 256;
 const URL_CG = (+new URLSearchParams(location.search).get('cg')) || 0;   // ?cg= nadpisuje adaptacyjną liczbę iteracji CG
-const PARAM_BYTES = 144;
+const PARAM_BYTES = 160;
 const VIEW_BYTES = 144 + 2 * 576;   // + przesunięcie wzoru cumulusów (36 kafli × vec4): wiatr warstwy cumulusów i średni 0–6 km
 // zoom mapy: powiększenie s (1 = cała mapa, ≤ 16) i lewy górny róg okna widoku (x, y – ułamek domeny, y w dół)
 const mz = { s: 1, x: 0, y: 0 };
@@ -430,6 +434,7 @@ async function init() {
     paint: null,
     worldOn: false, world: null, synTerrain: null, synTerrainPaint: null,   // Custom World Builder maps
     worldEdit: false,              // pre-start editor: presets/paint only; PE spin-up deferred until Begin weather
+    synUndoStack: [], synRedoStack: [], synTerrainMode: 'paint', synTerrainBrush: 'normal',
     probe: { i: MG + Math.floor(NXD / 2), j: MG + Math.floor(NYD / 2) },   // sonda (domyślnie środek mapy)
     probeEnc: -1, probeColAt: -1, probeCol: null,
   };
@@ -607,6 +612,7 @@ async function init() {
     sim.synTerrain = createSynTerrain(sim.world, synTerrainDomain(), {
       latCenter: bandCenter(num('lat')), latSpan: LYP / 111200,
     });
+    sim.synUndoStack = []; sim.synRedoStack = [];
     syncSynTerrainUi();
     if (!sim.worldEdit) { toast('Synoptic terrain changed — restarting weather'); reset(); }
   }
@@ -649,6 +655,7 @@ async function init() {
     if ($('synTerrainMap')) $('synTerrainMap').style.display = active ? '' : 'none';
     if ($('synTerrainControls')) $('synTerrainControls').style.display = active ? '' : 'none';
     if ($('synTerrainCreateHint')) $('synTerrainCreateHint').style.display = active ? 'none' : '';
+    if ($('synTerrainHeight')) $('synTerrainHeight').textContent = '0 m';
     drawSynTerrainMap();
   }
   function synTerrainXY(e) {
@@ -885,6 +892,7 @@ async function init() {
     sim.world = null;
     sim.synTerrain = null;
     sim.synTerrainPaint = null;
+    sim.synUndoStack = []; sim.synRedoStack = [];
     sim.wmask = null; sim.lmask = null; sim.vmask = null;
     $('shape').value = 'flat';
     setShape('flat');
@@ -915,26 +923,31 @@ async function init() {
   // Manipulacja atmosfery (zakładka Weather, strona tytułowa): T – anomalia temperatury [K], R – mnożnik opadu, V – zmienność pogody. Przy starcie działa od razu
   // (stan początkowy, rozbieg modelu synoptycznego), a zmiana w trakcie przebiegu wchodzi liniowo przez wybrany czas (odcinek from → to w t0…t1). Ten sam odcinek
   // widzą kopie modelu synoptycznego w swoim czasie, więc prognoza już pokazuje to, co nadchodzi. log – historia nastaw (ostatni wiersz CSV).
-  const manip = { T: seg(0), R: seg(1), V: seg(1), log: [] };
+  const manip = { T: seg(0), R: seg(1), V: seg(1), H: seg(0), W: seg(1), P: seg(0), C: seg(0), log: [] };
   {
     const q = new URLSearchParams(location.search);
     if (q.has('tan')) $('tanom').value = +q.get('tan');
     if (q.has('rnf')) $('manipR').value = nearest(MANIP_RAIN, +q.get('rnf'));
     if (q.has('vrf')) $('manipV').value = nearest(MANIP_VAR, +q.get('vrf'));
+    if (q.has('rha')) $('manipMoist').value = nearest(MANIP_MOISTURE, +q.get('rha'));
+    if (q.has('wdf')) $('manipWind').value = nearest(MANIP_WIND, +q.get('wdf'));
+    if (q.has('pah')) $('manipPressure').value = nearest(MANIP_PRESSURE, +q.get('pah'));
+    if (q.has('cla')) $('manipCloud').value = nearest(MANIP_CLOUD, +q.get('cla'));
   }
-  const manipTarget = () => ({ T: num('tanom'), R: MANIP_RAIN[num('manipR')], V: MANIP_VAR[num('manipV')] });
-  const mAt = (k, t) => (drv.mode === 'syn' ? segAt(manip[k], t) : (k === 'T' ? 0 : 1));
+  const manipTarget = () => ({ T: num('tanom'), R: MANIP_RAIN[num('manipR')], V: MANIP_VAR[num('manipV')],
+    H: MANIP_MOISTURE[num('manipMoist')], W: MANIP_WIND[num('manipWind')], P: MANIP_PRESSURE[num('manipPressure')], C: MANIP_CLOUD[num('manipCloud')] });
+  const mAt = (k, t) => (drv.mode === 'syn' ? segAt(manip[k], t) : (['T', 'H', 'P', 'C'].includes(k) ? 0 : 1));
   const manipVarAt = (t) => segAt(manip.V, t);
   // start przebiegu: od razu pełne nastawy
   function manipFlat() {
     const m = manipTarget();
-    for (const k of ['T', 'R', 'V']) manip[k] = seg(m[k]);
+    for (const k of ['T', 'R', 'V', 'H', 'W', 'P', 'C']) manip[k] = seg(m[k]);
     manip.log = [{ t: 0, ...m }];
   }
   // suwak w trakcie przebiegu: od bieżącej wartości do nowej przez czas „kick-in”
   function manipApply() {
     const m = manipTarget(), now = sim.time, ramp = +$('manipRamp').value * 86400;
-    for (const k of ['T', 'R', 'V']) if (manip[k].to !== m[k]) manip[k] = { from: segAt(manip[k], now), to: m[k], t0: now, t1: now + ramp };
+    for (const k of ['T', 'R', 'V', 'H', 'W', 'P', 'C']) if (manip[k].to !== m[k]) manip[k] = { from: segAt(manip[k], now), to: m[k], t0: now, t1: now + ramp };
     const last = manip.log[manip.log.length - 1];
     if (last && now - last.t < 1800) Object.assign(last, m); else manip.log.push({ t: now, ...m });
     manipUi();
@@ -944,14 +957,18 @@ async function init() {
     $('tanomV').textContent = fmtT(m.T); on('tanomV', m.T !== 0);
     $('manipRV').textContent = fmtX(m.R); on('manipRV', m.R !== 1);
     $('manipVV').textContent = fmtX(m.V); on('manipVV', m.V !== 1);
-    const left = Math.max(manip.T.t1, manip.R.t1, manip.V.t1) - now;
-    const txt = left > 0 ? `Kicking in, ${left >= 86400 ? `${(left / 86400).toFixed(1)} days` : `${Math.max(1, Math.round(left / 3600))} h`} left. Now ${fmtT(+segAt(manip.T, now).toFixed(1))}, precipitation ${fmtX(segAt(manip.R, now))}, variability ${fmtX(segAt(manip.V, now))}.` : '';
+    $('manipMoistV').textContent = fmtPP(m.H); on('manipMoistV', m.H !== 0);
+    $('manipWindV').textContent = fmtX(m.W); on('manipWindV', m.W !== 1);
+    $('manipPressureV').textContent = fmtHpa(m.P); on('manipPressureV', m.P !== 0);
+    $('manipCloudV').textContent = fmtPP(m.C); on('manipCloudV', m.C !== 0);
+    const left = Math.max(...['T', 'R', 'V', 'H', 'W', 'P', 'C'].map((k) => manip[k].t1)) - now;
+    const txt = left > 0 ? `Kicking in, ${left >= 86400 ? `${(left / 86400).toFixed(1)} days` : `${Math.max(1, Math.round(left / 3600))} h`} left. Now ${fmtT(+segAt(manip.T, now).toFixed(1))}, precipitation ${fmtX(segAt(manip.R, now))}, variability ${fmtX(segAt(manip.V, now))}, moisture ${fmtPP(segAt(manip.H, now))}, wind ${fmtX(segAt(manip.W, now))}, pressure ${fmtHpa(segAt(manip.P, now))}, cloudiness ${fmtPP(segAt(manip.C, now))}.` : '';
     if ($('manipNow').textContent !== txt) $('manipNow').textContent = txt;
   }
   // ostatni wiersz CSV: historia nastaw (bez niej raportu z przebiegu nie da się jednoznacznie opisać)
   function manipCsv() {
-    if (!manip.log.some((e) => e.T !== 0 || e.R !== 1 || e.V !== 1)) return 'atmosphere manipulation none';
-    return `atmosphere manipulation ${manip.log.map((e) => `day ${Math.floor(e.t / 86400) + 1}: T ${e.T} K, precip x${e.R}, variability x${e.V}`).join(' | ')}`;
+    if (!manip.log.some((e) => e.T !== 0 || e.R !== 1 || e.V !== 1 || e.H !== 0 || e.W !== 1 || e.P !== 0 || e.C !== 0)) return 'atmosphere manipulation none';
+    return `atmosphere manipulation ${manip.log.map((e) => `day ${Math.floor(e.t / 86400) + 1}: T ${e.T} K, precip x${e.R}, variability x${e.V}, moisture ${e.H} pp, wind x${e.W}, pressure ${e.P} hPa, cloudiness ${e.C} pp`).join(' | ')}`;
   }
   const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
   function constParams() {
@@ -968,6 +985,10 @@ async function init() {
     new Uint32Array(ab)[22] = slot;
     new Float32Array(ab)[31] = mAt('T', sim.time);     // manipulacja atmosfery: anomalia temperatury, mnożnik opadu
     new Float32Array(ab)[33] = mAt('R', sim.time);
+    new Float32Array(ab)[36] = mAt('H', sim.time);
+    new Float32Array(ab)[37] = mAt('W', sim.time);
+    new Float32Array(ab)[38] = mAt('P', sim.time);
+    new Float32Array(ab)[39] = mAt('C', sim.time);
     device.queue.writeBuffer(paramBuf, 0, ab);
     const enc = device.createCommandEncoder();
     const pass = enc.beginComputePass();
@@ -1661,6 +1682,10 @@ async function init() {
     new Uint32Array(ab)[21] = 0;
     new Float32Array(ab)[23] = snd.cool(0, num('hour'));
     new Float32Array(ab)[33] = 1;
+    new Float32Array(ab)[36] = mAt('H', 0);
+    new Float32Array(ab)[37] = mAt('W', 0);
+    new Float32Array(ab)[38] = mAt('P', 0);
+    new Float32Array(ab)[39] = mAt('C', 0);
     device.queue.writeBuffer(paramBuf, 0, ab);
     const enc = device.createCommandEncoder();
     const pass = enc.beginComputePass();
@@ -1713,8 +1738,10 @@ async function init() {
       sf[S.SM1 * NXY + c] = sf[S.SM2 * NXY + c] = sf[S.SM3 * NXY + c] = soilS(sf[S.W * NXY + c]);
       sf[S.T2 * NXY + c] = tg - 273.15;
       sf[S.TMAX * NXY + c] = tg - 273.15; sf[S.TMIN * NXY + c] = tg - 273.15; sf[S.SNAGE * NXY + c] = 10;
-      sf[S.TD2 * NXY + c] = dewpoint(Math.min(0.97, pv[5]) * qsat(tAir - cool0, ph), ph) - 273.15;
-      sf[S.PSL * NXY + c] = pv[12];
+      const rhStart = Math.max(0, Math.min(0.97, pv[5] + mAt('H', 0) / 100));
+      sf[S.TD2 * NXY + c] = dewpoint(rhStart * qsat(tAir - cool0, ph), ph) - 273.15;
+      const pAnom = mAt('P', 0) * Math.max(-1, Math.min(1, (pv[12] - 1013.25) / 10));
+      sf[S.PSL * NXY + c] = pv[12] + pAnom;
     }
     device.queue.writeBuffer(sfcBuf, 0, sf);
     sim.startHour = num('hour');
@@ -1770,6 +1797,10 @@ async function init() {
       f[27] = $('hydro').checked ? 1 : 0;                                         // hydrologia
       f[31] = mAt('T', t);                                                        // manipulacja atmosfery: anomalia temperatury dużej skali, mnożnik opadu
       f[33] = mAt('R', t);
+      f[36] = mAt('H', t);
+      f[37] = mAt('W', t);
+      f[38] = mAt('P', t);
+      f[39] = mAt('C', t);
       // zmiana deklinacji [rad/dobę] – fenologia (dzień się wydłuża / skraca)
       f[32] = 23.44 * Math.PI / 180 * 2 * Math.PI / 365 * Math.cos(2 * Math.PI * (284 + ck.doy) / 365);
       u[34] = sim.probe ? sim.probe.i : (MG + Math.floor(NXD / 2));
@@ -3471,11 +3502,27 @@ async function init() {
     if ($('synTerrainMap')) {
       const canvas = $('synTerrainMap');
       canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+      // height readout on hover
+      canvas.addEventListener('pointermove', (e) => {
+        if (!sim.synTerrain) return;
+        const r = canvas.getBoundingClientRect();
+        const u = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+        const v = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+        const latCenter = bandCenter(num('lat'));
+        const latSpan = LYP / 111200;
+        const lon = -180 + u * 360;
+        const lat = latCenter + ((1 - v) - 0.5) * latSpan;
+        const h = sampleSynTerrain(sim.synTerrain, lat, lon, latCenter, latSpan);
+        if ($('synTerrainHeight')) $('synTerrainHeight').textContent = `${Math.round(h)} m`;
+      });
       canvas.addEventListener('pointerdown', (e) => {
         if (!sim.worldOn || !sim.synTerrain) return;
         e.preventDefault();
         canvas.setPointerCapture(e.pointerId);
         const [x, y] = synTerrainXY(e);
+        // push undo snapshot at stroke start
+        synUndoPush(sim.synUndoStack, sim.synTerrain);
+        sim.synRedoStack = [];
         sim.synTerrainPaint = { x, y, sign: e.button === 2 || e.shiftKey ? -1 : 1 };
       });
       canvas.addEventListener('pointermove', (e) => {
@@ -3484,6 +3531,125 @@ async function init() {
       });
       canvas.addEventListener('pointerup', finishSynTerrainPaint);
       canvas.addEventListener('pointercancel', finishSynTerrainPaint);
+    }
+    // preset one-shot stamps
+    function synTerrainStamp(kind) {
+      if (!sim.worldOn || !sim.synTerrain) return;
+      const canvas = $('synTerrainMap');
+      if (!canvas) return;
+      // use last known cursor position or centre of canvas
+      const r = canvas.getBoundingClientRect();
+      const u = 0.5, v = 0.5;
+      const latCenter = bandCenter(num('lat'));
+      const latSpan = LYP / 111200;
+      const lon = -180 + u * 360;
+      const lat = latCenter + ((1 - v) - 0.5) * latSpan;
+      const x = u * SYN_TERRAIN_NX, y = (1 - v) * SYN_TERRAIN_NY;
+      const brushR = Math.max(0.75, num('synTerrainBrush') * 1000 / DXP);
+      synUndoPush(sim.synUndoStack, sim.synTerrain);
+      sim.synRedoStack = [];
+      if (kind === 'ridge') paintSynRidge(sim.synTerrain, x, y, brushR, 1200);
+      else if (kind === 'valley') paintSynValley(sim.synTerrain, x, y, brushR, 1200);
+      else if (kind === 'plateau') paintSynPlateau(sim.synTerrain, x, y, brushR, 1200);
+      drawSynTerrainMap();
+      if (!sim.worldEdit) { toast('Synoptic terrain changed — restarting weather'); reset(); }
+    }
+    if ($('synTerrainStampRidge')) $('synTerrainStampRidge').onclick = () => synTerrainStamp('ridge');
+    if ($('synTerrainStampValley')) $('synTerrainStampValley').onclick = () => synTerrainStamp('valley');
+    if ($('synTerrainStampPlateau')) $('synTerrainStampPlateau').onclick = () => synTerrainStamp('plateau');
+    // brush type selection
+    for (const id of ['synTerrainBrushNormal', 'synTerrainBrushRidge', 'synTerrainBrushValley', 'synTerrainBrushPlateau']) {
+      if ($(id)) $(id).onclick = () => {
+        sim.synTerrainBrush = id.replace('synTerrainBrush', '').toLowerCase();
+        for (const bid of ['synTerrainBrushNormal', 'synTerrainBrushRidge', 'synTerrainBrushValley', 'synTerrainBrushPlateau']) {
+          const b = $(bid);
+          if (b) b.classList.toggle('on', bid === id);
+        }
+      };
+    }
+    // mode toggle: stamp vs paint
+    if ($('synTerrainModeStamp')) $('synTerrainModeStamp').onclick = () => {
+      sim.synTerrainMode = 'stamp';
+      if ($('synTerrainModePaint')) $('synTerrainModePaint').classList.remove('on');
+      $('synTerrainModeStamp').classList.add('on');
+    };
+    if ($('synTerrainModePaint')) $('synTerrainModePaint').onclick = () => {
+      sim.synTerrainMode = 'paint';
+      if ($('synTerrainModeStamp')) $('synTerrainModeStamp').classList.remove('on');
+      $('synTerrainModePaint').classList.add('on');
+    };
+    // undo / redo
+    if ($('synTerrainUndo')) $('synTerrainUndo').onclick = () => {
+      if (!sim.synTerrain) return;
+      const prev = synUndoPop(sim.synUndoStack);
+      if (!prev) return;
+      sim.synRedoStack.push(sim.synTerrain.h.slice());
+      sim.synTerrain.h = prev;
+      drawSynTerrainMap();
+      if (!sim.worldEdit) { toast('Synoptic terrain undone — restarting weather'); reset(); }
+    };
+    if ($('synTerrainRedo')) $('synTerrainRedo').onclick = () => {
+      if (!sim.synTerrain || sim.synRedoStack.length === 0) return;
+      const next = sim.synRedoStack.pop();
+      synUndoPush(sim.synUndoStack, sim.synTerrain);
+      sim.synTerrain.h = next;
+      drawSynTerrainMap();
+      if (!sim.worldEdit) { toast('Synoptic terrain redone — restarting weather'); reset(); }
+    };
+    // export
+    if ($('synTerrainExportPng')) $('synTerrainExportPng').onclick = () => {
+      if (!sim.synTerrain) return;
+      const url = exportSynTerrainPNG(sim.synTerrain);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'synoptic-terrain.png'; a.click();
+      URL.revokeObjectURL(url);
+    };
+    if ($('synTerrainExportJson')) $('synTerrainExportJson').onclick = () => {
+      if (!sim.synTerrain) return;
+      const text = exportSynTerrainJSON(sim.synTerrain);
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'synoptic-terrain.json'; a.click();
+      URL.revokeObjectURL(url);
+    };
+    // import PNG
+    if ($('synTerrainImportPng')) {
+      const input = document.createElement('input');
+      input.type = 'file'; input.accept = 'image/*'; input.style.display = 'none';
+      document.body.appendChild(input);
+      $('synTerrainImportPng').onclick = () => { input.value = ''; input.click(); };
+      input.onchange = async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const terrain = await importSynTerrainPNG(file);
+        if (!terrain) { toast('Failed to read PNG terrain'); return; }
+        sim.synTerrain = terrain;
+        sim.synUndoStack = []; sim.synRedoStack = [];
+        drawSynTerrainMap();
+        if (!sim.worldEdit) { toast('Synoptic terrain imported — restarting weather'); reset(); }
+      };
+    }
+    // import JSON
+    if ($('synTerrainImportJson')) {
+      const input = document.createElement('input');
+      input.type = 'file'; input.accept = '.json'; input.style.display = 'none';
+      document.body.appendChild(input);
+      $('synTerrainImportJson').onclick = () => { input.value = ''; input.click(); };
+      input.onchange = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const terrain = importSynTerrainJSON(ev.target.result);
+          if (!terrain) { toast('Failed to read JSON terrain'); return; }
+          sim.synTerrain = terrain;
+          sim.synUndoStack = []; sim.synRedoStack = [];
+          drawSynTerrainMap();
+          if (!sim.worldEdit) { toast('Synoptic terrain imported — restarting weather'); reset(); }
+        };
+        reader.readAsText(file);
+      };
     }
     const beginWx = () => { beginWeather(); };
     if ($('worldBeginWx')) $('worldBeginWx').onclick = beginWx;
@@ -3776,9 +3942,14 @@ async function init() {
   gridInfo();
   $('gridBc').value = CFG.OPEN ? 'open' : 'per';
   const startArg = () => `${$('location').value === 'custom' ? `${num('lat').toFixed(3)},${num('lon').toFixed(3)}` : ','},${+($('date').value || '2026-06').slice(5, 7) - 1}`;
-  $('gridApply').onclick = () => { const g = gridPlan(), m = manipTarget(); location.search = `?dx=${g.dx}&nx=${g.nx}&ny=${g.ny}${$('gridBc').value === 'per' ? '&bc=per' : ''}&start=${startArg()}${manipQuery(m.T, m.R, m.V)}`; };
-  for (const id of ['tanom', 'manipR', 'manipV']) $(id).addEventListener('input', manipApply);
-  $('manipZero').onclick = () => { $('tanom').value = 0; $('manipR').value = MANIP_RAIN.indexOf(1); $('manipV').value = MANIP_VAR.indexOf(1); manipApply(); };
+  $('gridApply').onclick = () => { const g = gridPlan(), m = manipTarget(); location.search = `?dx=${g.dx}&nx=${g.nx}&ny=${g.ny}${$('gridBc').value === 'per' ? '&bc=per' : ''}&start=${startArg()}${manipQuery(m.T, m.R, m.V, m.H, m.W, m.P, m.C)}`; };
+  for (const id of ['tanom', 'manipR', 'manipV', 'manipMoist', 'manipWind', 'manipPressure', 'manipCloud']) $(id).addEventListener('input', manipApply);
+  $('manipZero').onclick = () => {
+    $('tanom').value = 0; $('manipR').value = MANIP_RAIN.indexOf(1); $('manipV').value = MANIP_VAR.indexOf(1);
+    $('manipMoist').value = MANIP_MOISTURE.indexOf(0); $('manipWind').value = MANIP_WIND.indexOf(1);
+    $('manipPressure').value = MANIP_PRESSURE.indexOf(0); $('manipCloud').value = MANIP_CLOUD.indexOf(0);
+    manipApply();
+  };
   $('manipBox').addEventListener('toggle', () => savePrefs());
   $('toTitle').onclick = () => { location.href = location.pathname; };
   $('gridBc').onchange = gridInfo;
@@ -5525,8 +5696,17 @@ async function init() {
     const pw = $('paintWhat').value;
     const br = brushR(), bi = brushInt();
     if (sim.synTerrainPaint && sim.synTerrain) {
-      paintSynTerrain(sim.synTerrain, sim.synTerrainPaint.x, sim.synTerrainPaint.y,
-        Math.max(0.75, num('synTerrainBrush') * 1000 / DXP), sim.synTerrainPaint.sign * 600 * bi * realDt);
+      const r = Math.max(0.75, num('synTerrainBrush') * 1000 / DXP);
+      const amt = sim.synTerrainPaint.sign * 600 * bi * realDt;
+      if (sim.synTerrainBrush === 'ridge') {
+        paintSynRidge(sim.synTerrain, sim.synTerrainPaint.x, sim.synTerrainPaint.y, r, amt);
+      } else if (sim.synTerrainBrush === 'valley') {
+        paintSynValley(sim.synTerrain, sim.synTerrainPaint.x, sim.synTerrainPaint.y, r, amt);
+      } else if (sim.synTerrainBrush === 'plateau') {
+        paintSynPlateau(sim.synTerrain, sim.synTerrainPaint.x, sim.synTerrainPaint.y, r, amt);
+      } else {
+        paintSynTerrain(sim.synTerrain, sim.synTerrainPaint.x, sim.synTerrainPaint.y, r, amt);
+      }
       drawSynTerrainMap();
     }
     if (sim.paint && pw === 'water') {

@@ -230,7 +230,7 @@
     #qualitySeg { display: flex; flex-wrap: wrap; }
     #qualitySeg button { flex: 1; min-width: 0; padding: 5px 6px; }
     .ttman { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-top: 4px; }
-    .ttman span { width: 84px; flex: none; }
+    .ttman span { width: 98px; flex: none; }
     .ttman input { flex: 1; min-width: 0; }
     .ttman b { width: 46px; flex: none; text-align: right; }
     #ttMonths { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
@@ -491,6 +491,10 @@
           <div class="ttman" title="Temperature anomaly of the whole troposphere, relative humidity unchanged"><span>Temperature</span><input id="ttTan" type="range" min="-10" max="10" step="0.5" value="0" /><b id="ttTanV"></b></div>
           <div class="ttman" title="More or less precipitation; soil moisture follows"><span>Precipitation</span><input id="ttRain" type="range" min="0" max="9" step="1" value="4" /><b id="ttRainV"></b></div>
           <div class="ttman" title="How active the weather is: above ×1 stronger lows and fronts, below ×1 quieter"><span>Variability</span><input id="ttVar" type="range" min="0" max="6" step="1" value="2" /><b id="ttVarV"></b></div>
+          <div class="ttman" title="Relative-humidity adjustment through the troposphere; affects cloud formation and precipitation"><span>Moisture</span><input id="ttMoist" type="range" min="0" max="8" step="1" value="4" /><b id="ttMoistV"></b></div>
+          <div class="ttman" title="Scales synoptic wind speed while preserving wind direction"><span>Wind speed</span><input id="ttWind" type="range" min="0" max="4" step="1" value="2" /><b id="ttWindV"></b></div>
+          <div class="ttman" title="Strengthens or weakens synoptic pressure systems, with a balanced wind response"><span>Pressure</span><input id="ttPressure" type="range" min="0" max="8" step="1" value="4" /><b id="ttPressureV"></b></div>
+          <div class="ttman" title="Adjusts relative humidity in cloud-forming layers; cloud water and ice evolve in the model"><span>Cloudiness</span><input id="ttCloud" type="range" min="0" max="8" step="1" value="4" /><b id="ttCloudV"></b></div>
         </div>
         <button id="ttStart" class="btn primary">Start</button>
         <div class="ttbtns">
@@ -548,6 +552,18 @@
           </div>
           <div class="strip" title="How active the weather is: the north–south temperature contrast and the jet stream of the synoptic model. Above ×1 stronger lows and fronts and bigger swings, below ×1 quieter weather. Builds up over days">
             <span class="slbl">Variability</span><input id="manipV" type="range" min="0" max="6" step="1" value="2" /><b id="manipVV"></b>
+          </div>
+          <div class="strip" title="Relative-humidity adjustment through the troposphere; affects cloud formation and precipitation">
+            <span class="slbl">Moisture</span><input id="manipMoist" type="range" min="0" max="8" step="1" value="4" /><b id="manipMoistV"></b>
+          </div>
+          <div class="strip" title="Scales synoptic wind speed while preserving wind direction">
+            <span class="slbl">Wind speed</span><input id="manipWind" type="range" min="0" max="4" step="1" value="2" /><b id="manipWindV"></b>
+          </div>
+          <div class="strip" title="Strengthens or weakens synoptic pressure systems, with a balanced wind response">
+            <span class="slbl">Pressure</span><input id="manipPressure" type="range" min="0" max="8" step="1" value="4" /><b id="manipPressureV"></b>
+          </div>
+          <div class="strip" title="Adjusts relative humidity in cloud-forming layers; cloud water and ice evolve in the model">
+            <span class="slbl">Cloudiness</span><input id="manipCloud" type="range" min="0" max="8" step="1" value="4" /><b id="manipCloudV"></b>
           </div>
           <div class="strip" title="How long a change made during the run takes to take full effect">
             <span class="slbl">Kick-in time</span><select id="manipRamp"><option value="0.25">6 hours</option><option value="1">1 day</option><option value="3" selected>3 days</option><option value="7">7 days</option><option value="14">14 days</option></select>
@@ -663,6 +679,30 @@
             <div class="btns">
               <button id="synTerrainCopy" class="btn" title="Copy the current local terrain over the separate map">Copy local terrain</button>
               <button id="synTerrainFlat" class="btn" title="Flatten the separate synoptic terrain map">Flatten</button>
+            </div>
+            <div class="hint" style="margin-top:6px">Brush type: <span id="synTerrainBrushType">Normal</span></div>
+            <div class="btns">
+              <button id="synTerrainBrushNormal" class="btn on" title="Soft circular brush (raise/lower)">Normal</button>
+              <button id="synTerrainBrushRidge" class="btn" title="Narrow raised ridge">Ridge</button>
+              <button id="synTerrainBrushValley" class="btn" title="Lowered valley trench">Valley</button>
+              <button id="synTerrainBrushPlateau" class="btn" title="Flat-topped plateau">Plateau</button>
+            </div>
+            <div class="btns" style="margin-top:4px">
+              <button id="synTerrainModeStamp" class="btn" title="One-click stamp at canvas centre">Stamp</button>
+              <button id="synTerrainModePaint" class="btn on" title="Drag to paint continuously">Paint</button>
+            </div>
+            <div class="btns" style="margin-top:4px">
+              <button id="synTerrainUndo" class="btn" disabled title="Undo last terrain stroke (15 steps)">Undo</button>
+              <button id="synTerrainRedo" class="btn" disabled title="Redo last undone stroke">Redo</button>
+            </div>
+            <div id="synTerrainHeight" style="margin-top:6px; font-size:11px; color:var(--muted)">Height: 0 m</div>
+            <div class="btns" style="margin-top:6px">
+              <button id="synTerrainExportPng" class="btn" title="Download terrain as grayscale PNG">Export PNG</button>
+              <button id="synTerrainExportJson" class="btn" title="Download terrain as JSON data">Export JSON</button>
+            </div>
+            <div class="btns" style="margin-top:4px">
+              <button id="synTerrainImportPng" class="btn" title="Load terrain from PNG image">Import PNG</button>
+              <button id="synTerrainImportJson" class="btn" title="Load terrain from JSON file">Import JSON</button>
             </div>
           </div>
         </div>

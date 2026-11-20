@@ -411,6 +411,139 @@ export function unpackSynTerrain(pack) {
   return terrain;
 }
 
+// ---------- preset brush shapes for synoptic terrain ----------
+
+/** Narrow raised ridge: steep Gaussian falloff, higher peak at centre. */
+export function paintSynRidge(terrain, x, y, r, amount) {
+  const R = Math.ceil(2 * r), r2 = r * r, invR2 = 1 / (r2 || 1);
+  for (let dj = -R; dj <= R; dj++) {
+    const jj = Math.floor(y) + dj;
+    if (jj < 0 || jj >= terrain.ny) continue;
+    for (let di = -R; di <= R; di++) {
+      const ii = (Math.floor(x) + di) % terrain.nx; const wrapped = ((ii % terrain.nx) + terrain.nx) % terrain.nx;
+      const dx = Math.floor(x) + di + 0.5 - x, dy = jj + 0.5 - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > 4 * r2) continue;
+      // ridge: sharper than plain brush, peak weighted toward centre
+      const weight = Math.exp(-d2 * invR2 * 1.6);
+      if (weight < 0.05) continue;
+      const c = jj * terrain.nx + wrapped;
+      terrain.h[c] = Math.min(8000, Math.max(0, terrain.h[c] + amount * weight * 1.4));
+    }
+  }
+}
+
+/** Lowered valley: negative Gaussian, steep falloff, digs a trench. */
+export function paintSynValley(terrain, x, y, r, amount) {
+  const R = Math.ceil(2 * r), r2 = r * r, invR2 = 1 / (r2 || 1);
+  for (let dj = -R; dj <= R; dj++) {
+    const jj = Math.floor(y) + dj;
+    if (jj < 0 || jj >= terrain.ny) continue;
+    for (let di = -R; di <= R; di++) {
+      const ii = (Math.floor(x) + di) % terrain.nx; const wrapped = ((ii % terrain.nx) + terrain.nx) % terrain.nx;
+      const dx = Math.floor(x) + di + 0.5 - x, dy = jj + 0.5 - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > 4 * r2) continue;
+      const weight = Math.exp(-d2 * invR2 * 1.4);
+      if (weight < 0.05) continue;
+      const c = jj * terrain.nx + wrapped;
+      terrain.h[c] = Math.max(0, terrain.h[c] - amount * weight * 1.4);
+    }
+  }
+}
+
+/** Flat-topped plateau: Gaussian core with hard edge, rises then clamps. */
+export function paintSynPlateau(terrain, x, y, r, amount) {
+  const R = Math.ceil(2 * r), r2 = r * r, invR2 = 1 / (r2 || 1);
+  const coreR2 = r2 * 0.36; // flat core radius
+  for (let dj = -R; dj <= R; dj++) {
+    const jj = Math.floor(y) + dj;
+    if (jj < 0 || jj >= terrain.ny) continue;
+    for (let di = -R; di <= R; di++) {
+      const ii = (Math.floor(x) + di) % terrain.nx; const wrapped = ((ii % terrain.nx) + terrain.nx) % terrain.nx;
+      const dx = Math.floor(x) + di + 0.5 - x, dy = jj + 0.5 - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > 4 * r2) continue;
+      let weight;
+      if (d2 <= coreR2) weight = 1; // flat top
+      else weight = Math.exp(-(d2 - coreR2) * invR2 * 2); // steep edge falloff
+      if (weight < 0.05) continue;
+      const c = jj * terrain.nx + wrapped;
+      terrain.h[c] = Math.min(8000, Math.max(0, terrain.h[c] + amount * weight * 1.2));
+    }
+  }
+}
+
+// ---------- undo /redo for synoptic terrain ----------
+
+export const SYN_UNDO_MAX = 15;
+
+/** Push a snapshot of terrain.h onto the undo stack; clears redo stack. */
+export function synUndoPush(stack, terrain) {
+  if (!terrain) return;
+  stack.push(terrain.h.slice());
+  while (stack.length > SYN_UNDO_MAX) stack.shift();
+}
+
+/** Restore terrain.h from the last undo snapshot; returns the popped snapshot or null. */
+export function synUndoPop(stack) {
+  return stack.length ? stack.pop() : null;
+}
+
+// ---------- export / import synoptic terrain ----------
+
+/** Export synoptic terrain as a grayscale PNG data URL (height 0-8000 m -> 0-255). */
+export function exportSynTerrainPNG(terrain) {
+  const canvas = document.createElement('canvas');
+  canvas.width = terrain.nx; canvas.height = terrain.ny;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(terrain.nx, terrain.ny);
+  for (let c = 0, p = 0; c < terrain.h.length; c++, p += 4) {
+    const v = Math.min(255, Math.max(0, Math.round(terrain.h[c] / 8000 * 255)));
+    img.data[p] = v; img.data[p + 1] = v; img.data[p + 2] = v; img.data[p + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+/** Export synoptic terrain as a JSON string ({nx, ny, h: [int...]}). */
+export function exportSynTerrainJSON(terrain) {
+  return JSON.stringify({ nx: terrain.nx, ny: terrain.ny, h: Array.from(terrain.h, (x) => Math.round(x)) });
+}
+
+/** Import synoptic terrain from a PNG image blob (grayscale -> 0-8000 m). Returns terrain object or null. */
+export function importSynTerrainPNG(blob) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width; canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, img.width, img.height).data;
+      const h = new Float32Array(img.width * img.height);
+      for (let c = 0, p = 0; c < h.length; c++, p += 4) {
+        const g = data[p]; // grayscale assumed
+        h[c] = Math.min(8000, Math.max(0, g / 255 * 8000));
+      }
+      resolve({ nx: img.width, ny: img.height, h });
+    };
+    img.onerror = () => resolve(null);
+    img.src = URL.createObjectURL(blob);
+  });
+}
+
+/** Import synoptic terrain from a JSON string. Returns terrain object or null. */
+export function importSynTerrainJSON(text) {
+  try {
+    const pack = JSON.parse(text);
+    if (pack.nx !== SYN_TERRAIN_NX || pack.ny !== SYN_TERRAIN_NY || !Array.isArray(pack.h) || pack.h.length !== SYN_TERRAIN_NX * SYN_TERRAIN_NY) return null;
+    const terrain = { nx: pack.nx, ny: pack.ny, h: new Float32Array(pack.h.length) };
+    for (let c = 0; c < terrain.h.length; c++) terrain.h[c] = Math.min(8000, Math.max(0, Number(pack.h[c]) || 0));
+    return terrain;
+  } catch { return null; }
+}
+
 /**
  * Sampler for the PE channel: maps (lat, lon) into the custom world tile that covers the domain.
  * Domain spans lat0±dLat/2, lon0±dLon/2; outside, the tile wraps (periodic planet).

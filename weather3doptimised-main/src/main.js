@@ -438,6 +438,9 @@ async function init() {
     synUndoStack: [], synRedoStack: [], synTerrainMode: 'paint', synTerrainBrush: 'normal',
     probe: { i: MG + Math.floor(NXD / 2), j: MG + Math.floor(NYD / 2) },   // sonda (domyślnie środek mapy)
     probeEnc: -1, probeColAt: -1, probeCol: null,
+    wbLayer: 'elevation', wbVeg: 0,
+    wbUndoStack: [], wbRedoStack: [],
+    wbPainting: false, wbPreStroke: null, wbPreStroke2: null,
   };
   const gpuBacklog = () => Math.max(0, sim.gpuGen - sim.gpuDoneGen);
   const markGpuSubmit = () => {
@@ -660,6 +663,205 @@ async function init() {
     if ($('synBrushIntV')) $('synBrushIntV').textContent = `${num('synBrushInt')} %`;
     drawSynTerrainMap();
   }
+  // World Builder canvas render
+  function drawWbCanvas() {
+    const canvas = $('wbCanvas');
+    if (!canvas) return;
+    if (!sim.worldOn || !sim.world) {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      canvas.width = NXD; canvas.height = NYD;
+      ctx.fillStyle = '#0a1a2e';
+      ctx.fillRect(0, 0, NXD, NYD);
+      return;
+    }
+    if (canvas.width !== NXD || canvas.height !== NYD) { canvas.width = NXD; canvas.height = NYD; }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const w = sim.world;
+    const img = ctx.createImageData(NXD, NYD);
+    let hmax = 0;
+    for (let c = 0; c < w.nx * w.ny; c++) hmax = Math.max(hmax, w.h[c]);
+    if (hmax < 1) hmax = 1;
+    for (let j = 0; j < NYD; j++) {
+      const jj = NYD - 1 - j; // flip Y: south at bottom of canvas
+      for (let i = 0; i < NXD; i++) {
+        const c = (jj + MG) * w.nx + (i + MG);
+        const p = (j * NXD + i) * 4;
+        if (w.sea[c]) {
+          img.data[p] = 10; img.data[p + 1] = 42; img.data[p + 2] = 94; img.data[p + 3] = 255;
+        } else if (w.lake[c]) {
+          img.data[p] = 42; img.data[p + 1] = 90; img.data[p + 2] = 140; img.data[p + 3] = 255;
+        } else {
+          const t = Math.sqrt(w.h[c] / hmax);
+          img.data[p]     = Math.round(30  + 160 * t);
+          img.data[p + 1] = Math.round(55  + 110 * t);
+          img.data[p + 2] = Math.round(20  + 60  * t);
+          img.data[p + 3] = 255;
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function updateWbReadout(pos) {
+    const el = $('wbReadout');
+    if (!el) return;
+    if (!pos || !sim.worldOn || !sim.world) { el.textContent = ''; return; }
+    const { x, y } = pos;
+    const wd = sim.world;
+    const cx = Math.min(wd.nx - 1, Math.max(0, Math.floor(x) + MG));
+    const cy = Math.min(wd.ny - 1, Math.max(0, Math.floor(y) + MG));
+    const c = cy * wd.nx + cx;
+    const layer = sim.wbLayer;
+    if (layer === 'elevation') {
+      el.textContent = `Elevation: ${Math.round(wd.h[c])} m`;
+    } else if (layer === 'sst') {
+      const v = wd.sst[c];
+      el.textContent = Number.isFinite(v) ? `SST: ${v.toFixed(1)} °C` : 'SST: auto (climatology)';
+    } else if (layer === 'soil') {
+      el.textContent = `Soil moisture: ${Math.round(wd.soil[c] * 100)} %`;
+    } else if (layer === 'veg') {
+      const v = wd.veg[c];
+      el.textContent = `Vegetation: ${v >= 0 ? VEG_NAMES[v] : 'auto'}`;
+    } else if (layer === 'sea') {
+      el.textContent = wd.sea[c] ? 'Sea' : 'Land';
+    } else if (layer === 'lake') {
+      el.textContent = wd.lake[c] ? 'Lake' : 'Land';
+    } else {
+      el.textContent = (wd.sea[c] || wd.lake[c]) ? 'Water' : 'Land';
+    }
+  }
+
+  function wbUndoPushEntry(entry) {
+    sim.wbUndoStack.push(entry);
+    if (sim.wbUndoStack.length > 15) sim.wbUndoStack.shift();
+    sim.wbRedoStack = [];
+  }
+
+  function wbUndo() {
+    if (!sim.wbUndoStack.length || !sim.world) return;
+    const entry = sim.wbUndoStack.pop();
+    sim.wbRedoStack.push({ layer: entry.layer, snap: sim.world[entry.layer].slice() });
+    sim.world[entry.layer].set(entry.snap);
+    applyWorldToSim();
+    drawWbCanvas();
+    wbUndoRedoSync();
+    if (!sim.worldEdit) { toast('Undone — restarting weather'); reset(); }
+  }
+
+  function wbRedo() {
+    if (!sim.wbRedoStack.length || !sim.world) return;
+    const entry = sim.wbRedoStack.pop();
+    sim.wbUndoStack.push({ layer: entry.layer, snap: sim.world[entry.layer].slice() });
+    sim.world[entry.layer].set(entry.snap);
+    applyWorldToSim();
+    drawWbCanvas();
+    wbUndoRedoSync();
+    if (!sim.worldEdit) { toast('Redone — restarting weather'); reset(); }
+  }
+
+  function wbUndoRedoSync() {
+    const u = $('wbUndo'), r = $('wbRedo');
+    if (u) u.disabled = !sim.wbUndoStack.length;
+    if (r) r.disabled = !sim.wbRedoStack.length;
+  }
+
+  // Convert canvas pointer coords → world-grid cell coords (visible domain, no margin offset)
+  function wbCanvasXY(e) {
+    const canvas = $('wbCanvas');
+    const r = canvas.getBoundingClientRect();
+    const u = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const v = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    // canvas Y is flipped: top = north = high j
+    return [Math.floor(u * NXD), Math.floor((1 - v) * NYD)];
+  }
+
+  function wbLayerAmounts() {
+    const int = brushInt();
+    return {
+      elevation: 50 * int,
+      sst: 2 * int,
+      soil: 0.05 * int,
+      sea: 1, lake: 1, land: 0,
+      veg: sim.wbVeg ?? 0,
+    };
+  }
+
+  function isHardWbLayer() {
+    return sim.wbLayer === 'sea' || sim.wbLayer === 'lake' || sim.wbLayer === 'land';
+  }
+
+  function applyWbBrush(x, y, sign) {
+    if (!sim.worldOn || !sim.world) return;
+    const w = sim.world;
+    // Convert visible-domain coords to world-map coords (add margin MG)
+    const wx = x + MG, wy = y + MG;
+    const r = brushR();
+    const layer = sim.wbLayer;
+    if (layer === 'land') {
+      // Erase water: paint sea and lake with amount=0
+      paintWorld(w, 'sea', wx, wy, r, 0, { hard: true });
+      paintWorld(w, 'lake', wx, wy, r, 0, { hard: true });
+    } else {
+      const amounts = wbLayerAmounts();
+      paintWorld(w, layer, wx, wy, r, sign * amounts[layer], { hard: isHardWbLayer() });
+    }
+  }
+
+  function onWbPointerDown(e) {
+    if (!sim.worldOn) { ensureWorld(); sim.worldOn = true; }
+    e.preventDefault();
+    const canvas = $('wbCanvas');
+    canvas.setPointerCapture(e.pointerId);
+    sim.wbPainting = true;
+    // Snapshot pre-stroke state for undo
+    const layer = sim.wbLayer === 'land' ? 'sea' : sim.wbLayer;
+    sim.wbPreStroke = { layer, snap: sim.world[layer].slice() };
+    if (sim.wbLayer === 'land') {
+      sim.wbPreStroke2 = { layer: 'lake', snap: sim.world.lake.slice() };
+    } else {
+      sim.wbPreStroke2 = null;
+    }
+    const [x, y] = wbCanvasXY(e);
+    const sign = (e.buttons & 2) ? -1 : 1;
+    applyWbBrush(x, y, sign);
+    syncWorldBrushVisual(x + MG, y + MG, brushR());
+    drawWbCanvas();
+  }
+
+  function onWbPointerMove(e) {
+    if (!sim.wbPainting) return;
+    const [x, y] = wbCanvasXY(e);
+    const sign = (e.buttons & 2) ? -1 : 1;
+    applyWbBrush(x, y, sign);
+    syncWorldBrushVisual(x + MG, y + MG, brushR());
+    drawWbCanvas();
+  }
+
+  function onWbPointerUp(e) {
+    if (!sim.wbPainting) return;
+    sim.wbPainting = false;
+    if (sim.wbPreStroke) {
+      wbUndoPushEntry(sim.wbPreStroke);
+      sim.wbPreStroke = null;
+    }
+    if (sim.wbPreStroke2) {
+      wbUndoPushEntry(sim.wbPreStroke2);
+      sim.wbPreStroke2 = null;
+    }
+    sim.paintNeedsFlush = true;
+    flushPaintTerrain();
+    drawWbCanvas();
+    wbUndoRedoSync();
+  }
+
+  function onWbHover(e) {
+    if (sim.wbPainting) return;
+    const [x, y] = wbCanvasXY(e);
+    updateWbReadout({ x, y });
+  }
+
   function synTerrainXY(e) {
     const canvas = $('synTerrainMap'), r = canvas.getBoundingClientRect();
     const u = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
@@ -711,10 +913,6 @@ async function init() {
     setWorldEdit(true);
     sim.busy = false;
     sim.paused = true;
-    if ($('paint')) {
-      $('paint').checked = true;
-      $('paint').dispatchEvent(new Event('change'));
-    }
     selectTab('ter', true);
     if ($('fieldH')) {
       $('fieldH').value = '30';
@@ -722,6 +920,7 @@ async function init() {
     }
     labels();
     drawPreview();
+    drawWbCanvas();
   }
   async function beginWeather() {
     if (!sim.worldEdit) return;
@@ -807,12 +1006,14 @@ async function init() {
   function flushPaintTerrain() {
     if (!sim.paintNeedsFlush) return;
     sim.paintNeedsFlush = false;
-    if (sim.worldOn && sim.world) applyWorldToSim();
-    else { applyTerrain(); applyLand(); }
+    if (sim.worldOn && sim.world) {
+      applyWorldToSim();
+      if (sim.wbLayer === 'sst') syncWaterSstToGpu();
+      if (!sim.worldEdit) reset();
+    } else { applyTerrain(); applyLand(); }
     $('hills').value = String(Math.round(sim.hmax / 50) * 50 || 0);
     if ($('hillsV')) $('hillsV').textContent = fmH(sim.hmax);
     worldHint();
-    if ($('paintWhat')?.value === 'sst') syncWaterSstToGpu();
   }
   // Push water-cell SST (°C → K) into S_TS so field 78 (classic SST map) updates live while painting.
   function syncWaterSstToGpu() {
@@ -3431,94 +3632,121 @@ document.querySelectorAll('#worldSubTabs button').forEach((b) => b.addEventListe
     a.download = `terrain_${Math.round(sim.hmax)}m.png`;
     a.click();
   };
-  // pędzle: wysokość, woda, SST, gleba, typy powierzchni; przy malowaniu mapa wysokości albo typów powierzchni
+  // World Builder UI (unified panel: preset, paint layers, brush, synoptic terrain, import/export)
   {
-    const sel = $('paintWhat');
-    sel.add(new Option('Terrain height', 'terrain'));
-    sel.add(new Option('Water (lake, sea)', 'water'));
-    sel.add(new Option('Sea (custom world)', 'sea'));
-    sel.add(new Option('Lake (custom world)', 'lake'));
-    sel.add(new Option('Sea surface temperature', 'sst'));
-    sel.add(new Option('Soil moisture', 'soil'));
-    const g = document.createElement('optgroup');
-    g.label = 'Surface type';
-    for (const k of [VEG.GRASS, VEG.DECID, VEG.TAIGA, VEG.SCLERO, VEG.RAINFOREST, VEG.SAVANNA, VEG.STEPPE, VEG.DESERT, VEG.TUNDRA, VEG.GLACIER, VEG.URBAN]) {
-      g.appendChild(new Option(VEG_NAMES[k][0].toUpperCase() + VEG_NAMES[k].slice(1), `veg:${k}`));
-    }
-    sel.appendChild(g);
-    const brushLabs = () => {
-      const v = sel.value;
-      if ($('sstBrushLab')) $('sstBrushLab').style.display = v === 'sst' ? '' : 'none';
-      if ($('soilBrushLab')) $('soilBrushLab').style.display = v === 'soil' ? '' : 'none';
-    };
-    const paintView = () => {
-      brushLabs();
-      if (!$('paint').checked) return;
-      const v = sel.value;
-      $('fieldH').value = v === 'terrain' ? '30' : v === 'sst' ? '78' : v === 'soil' ? '28' : '79';
-      $('fieldH').dispatchEvent(new Event('change'));
-      if (v === 'sst') syncWaterSstToGpu();
-      labels();
-    };
-    $('paint').onchange = paintView;
-    sel.onchange = paintView;
-    if ($('sstBrush')) $('sstBrush').oninput = () => { $('sstBrushV').textContent = `${num('sstBrush')}`; };
-    if ($('soilBrush')) $('soilBrush').oninput = () => { $('soilBrushV').textContent = `${num('soilBrush')} %`; };
-  }
-  // Synoptic terrain paint controls
-  {
-    const sel = $('synPaintWhat');
-    if (sel) {
-      sel.add(new Option('Terrain height', 'terrain'));
-      sel.add(new Option('Sea surface temperature', 'sst'));
-      sel.add(new Option('Soil moisture', 'soil'));
-      sel.value = 'terrain';
-      const paintSynView = () => {
-        if (!$('synPaint').checked) return;
-        labels();
-      };
-      $('synPaint').onchange = paintSynView;
-      sel.onchange = paintSynView;
-    }
-    if ($('synBrushInt')) $('synBrushInt').oninput = () => { $('synBrushIntV').textContent = `${num('synBrushInt')} %`; };
-  }
-  // World Builder UI
-  {
+    // Populate preset dropdown
     const sel = $('worldPreset');
     if (sel) {
       for (const [k, name] of Object.entries(WORLD_PRESETS)) sel.add(new Option(name, k));
       sel.value = 'island';
     }
-    if ($('worldApplyPreset')) $('worldApplyPreset').onclick = () => {
-      const p = $('worldPreset').value || 'island';
+    // Populate vegetation selector
+    const vegSel = $('wbVegSel');
+    if (vegSel) {
+      for (let i = 0; i < VEG_NAMES.length; i++) vegSel.add(new Option(VEG_NAMES[i], String(i)));
+      vegSel.value = '0';
+      vegSel.addEventListener('change', () => { sim.wbVeg = Number(vegSel.value); });
+    }
+    // Layer tab buttons
+    for (const btn of document.querySelectorAll('.wb-layer')) {
+      btn.addEventListener('click', () => {
+        sim.wbLayer = btn.dataset.layer;
+        for (const b of document.querySelectorAll('.wb-layer')) b.classList.toggle('on', b === btn);
+        const vrow = $('wbVegRow');
+        if (vrow) vrow.style.display = sim.wbLayer === 'veg' ? '' : 'none';
+        updateWbReadout(null);
+      });
+    }
+    // Brush sliders display
+    const brushEl = $('brush'), brushVEl = $('brushV');
+    if (brushEl) {
+      configureBrushUi();
+      brushEl.addEventListener('input', () => { if (brushVEl) brushVEl.textContent = `${(+brushEl.value).toFixed(1)} km`; });
+      if (brushVEl) brushVEl.textContent = `${(+brushEl.value).toFixed(1)} km`;
+    }
+    const brushIntEl = $('brushInt'), brushIntVEl = $('brushIntV');
+    if (brushIntEl) {
+      brushIntEl.addEventListener('input', () => { if (brushIntVEl) brushIntVEl.textContent = `${brushIntEl.value} %`; });
+    }
+    // wbCanvas painting
+    const wbCv = $('wbCanvas');
+    if (wbCv) {
+      wbCv.addEventListener('contextmenu', (e) => e.preventDefault());
+      wbCv.addEventListener('pointerdown', onWbPointerDown);
+      wbCv.addEventListener('pointermove', (e) => { onWbPointerMove(e); onWbHover(e); });
+      wbCv.addEventListener('pointerup', onWbPointerUp);
+      wbCv.addEventListener('pointercancel', onWbPointerUp);
+    }
+    // Undo / Redo for world-map layers
+    if ($('wbUndo')) $('wbUndo').addEventListener('click', wbUndo);
+    if ($('wbRedo')) $('wbRedo').addEventListener('click', wbRedo);
+    // Preset controls
+    if ($('worldApplyPreset')) $('worldApplyPreset').addEventListener('click', () => {
+      const p = ($('worldPreset') && $('worldPreset').value) || 'island';
       enableCustomWorld(p, sim.world?.seed || (1 + Math.floor(Math.random() * 1e9)));
-      reset(); labels();
-    };
-    if ($('worldRandom')) $('worldRandom').onclick = () => {
+      sim.wbUndoStack = []; sim.wbRedoStack = []; wbUndoRedoSync();
+      if (!sim.worldEdit) { toast('Preset applied — restarting weather'); reset(); }
+      else { drawWbCanvas(); worldHint(); }
+      labels();
+    });
+    if ($('worldRandom')) $('worldRandom').addEventListener('click', () => {
       const p = ($('worldPreset') && $('worldPreset').value) || sim.world?.preset || 'island';
       enableCustomWorld(p, 1 + Math.floor(Math.random() * 1e9));
-      reset(); labels();
-    };
-    if ($('worldHemi')) $('worldHemi').onchange = () => {
+      sim.wbUndoStack = []; sim.wbRedoStack = []; wbUndoRedoSync();
+      if (!sim.worldEdit) { toast('World randomized — restarting weather'); reset(); }
+      else { drawWbCanvas(); worldHint(); }
+      labels();
+    });
+    if ($('worldHemi')) $('worldHemi').addEventListener('change', () => {
       applyWorldHemisphere($('worldHemi').value);
       if (!sim.worldOn) return;
-      // Seasons / SST clim / auto vegetation follow the new latitude
       applyLand({ light: !!sim.worldEdit });
       syncWaterSstToGpu();
       labels();
-      if (!sim.worldEdit) reset();
-      else { drawPreview(); toast(`${hemiLabel()} hemisphere — climate latitude ${(+num('lat')).toFixed(1)}°`); }
-    };
-    if ($('worldClear')) $('worldClear').onclick = () => {
+      if (!sim.worldEdit) { toast(`Hemisphere changed — restarting weather`); reset(); }
+      else { drawWbCanvas(); drawPreview(); toast(`${hemiLabel()} hemisphere — climate latitude ${(+num('lat')).toFixed(1)}°`); }
+    });
+    if ($('wbClear')) $('wbClear').addEventListener('click', () => {
       if (sim.worldEdit) {
         enableCustomWorld('island');
-        reset(); labels();
-        toast('Reset to the island preset — press Begin weather when ready');
+        sim.wbUndoStack = []; sim.wbRedoStack = []; wbUndoRedoSync();
+        drawWbCanvas(); worldHint();
+        toast('Reset to island preset — press Begin weather when ready');
         return;
       }
       disableCustomWorld();
       reset(); labels();
-    };
+    });
+    // World import / export
+    if ($('wbExportJson')) $('wbExportJson').addEventListener('click', () => {
+      if (!sim.world) return;
+      const blob = new Blob([JSON.stringify(packWorld(sim.world))], { type: 'application/json' });
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'world.json' });
+      a.click(); URL.revokeObjectURL(a.href);
+    });
+    if ($('wbImportJson')) {
+      const inp = Object.assign(document.createElement('input'), { type: 'file', accept: '.json', style: 'display:none' });
+      document.body.appendChild(inp);
+      $('wbImportJson').addEventListener('click', () => { inp.value = ''; inp.click(); });
+      inp.addEventListener('change', async (e) => {
+        const file = e.target.files?.[0]; if (!file) return;
+        try {
+          const pack = JSON.parse(await file.text());
+          const w = unpackWorld(pack, NXV, NYV);
+          if (!w) { toast('Import failed — incompatible world file'); return; }
+          sim.world = w; sim.worldOn = true;
+          sim.wbUndoStack = []; sim.wbRedoStack = []; wbUndoRedoSync();
+          applyWorldToSim(); drawWbCanvas(); worldHint();
+          if (!sim.worldEdit) { toast('World imported — restarting weather'); reset(); }
+          else { toast('World imported'); }
+        } catch { toast('Import failed — could not read file'); }
+      });
+    }
+    // Begin weather
+    if ($('worldBeginWxSide')) $('worldBeginWxSide').addEventListener('click', beginWeather);
+    // Initialise status hint
+    worldHint();
+    drawWbCanvas();
     if ($('synTerrainCreate')) $('synTerrainCreate').onclick = resetSynTerrainFromWorld;
     if ($('synTerrainCopy')) $('synTerrainCopy').onclick = resetSynTerrainFromWorld;
     if ($('synTerrainFlat')) $('synTerrainFlat').onclick = () => {
@@ -3547,7 +3775,7 @@ document.querySelectorAll('#worldSubTabs button').forEach((b) => b.addEventListe
         if ($('synTerrainHeight')) $('synTerrainHeight').textContent = `${Math.round(h)} m`;
       });
       canvas.addEventListener('pointerdown', (e) => {
-        if (!sim.worldOn || !sim.synTerrain || !$('synPaint').checked) return;
+        if (!sim.worldOn || !sim.synTerrain) return;
         e.preventDefault();
         canvas.setPointerCapture(e.pointerId);
         const [x, y] = synTerrainXY(e);
@@ -3844,7 +4072,7 @@ document.querySelectorAll('#worldSubTabs button').forEach((b) => b.addEventListe
   cxy.addEventListener('dblclick', () => { if (!v3.on) setZoom(1); });
   let pan = null;
   cxy.addEventListener('pointerdown', (e) => {
-    if (v3.on || $('paint').checked || mz.s <= 1) return;
+    if (v3.on || mz.s <= 1) return;
     pan = { x: e.clientX, y: e.clientY, ox: mz.x, oy: mz.y, moved: false };
     cxy.setPointerCapture(e.pointerId);
   });
@@ -3858,22 +4086,9 @@ document.querySelectorAll('#worldSubTabs button').forEach((b) => b.addEventListe
     onZoom();
   });
   cxy.addEventListener('pointerup', () => { if (pan) { cxy.style.cursor = 'crosshair'; setTimeout(() => { pan = null; }, 0); } });
-  cxy.addEventListener('contextmenu', (e) => { if ($('paint').checked) e.preventDefault(); });
-  cxy.addEventListener('pointerdown', (e) => {
-    if (v3.on || !$('paint').checked) return;
-    cxy.setPointerCapture(e.pointerId);
-    const [x, y] = mapXY(e);
-    sim.paint = { x, y, sign: e.button === 2 || e.shiftKey ? -1 : 1 };
-  });
-  cxy.addEventListener('pointerup', () => {
-    if (sim.paint) { sim.paint = null; flushPaintTerrain(); }
-  });
-  cxy.addEventListener('pointercancel', () => {
-    if (sim.paint) { sim.paint = null; flushPaintTerrain(); }
-  });
   // kliknięcie (bez malowania): sonda w tym punkcie – sondaż i meteogram
   cxy.addEventListener('click', (e) => {
-    if (v3.on || $('paint').checked || (pan && pan.moved)) return;
+    if (v3.on || (pan && pan.moved)) return;
     const [x, y] = mapXY(e);
     const i = Math.floor(x), j = Math.floor(y);
     if (i < MG || i >= MG + NXD || j < MG || j >= MG + NYD) return;
@@ -5773,9 +5988,9 @@ document.querySelectorAll('#worldSubTabs button').forEach((b) => b.addEventListe
     flyTick(realDt);
 
     // malowanie terenu / custom world — light GPU sync while brush is down; full flowNet on pointer-up
-    const pw = $('paintWhat').value;
+    const pw = $('paintWhat')?.value || 'terrain';
     const br = brushR(), bi = brushInt();
-    if (sim.synTerrainPaint && sim.synTerrain && $('synPaint').checked) {
+    if (sim.synTerrainPaint && sim.synTerrain) {
       const r = Math.max(0.75, num('synTerrainBrush') * 1000 / DXP);
       const amt = sim.synTerrainPaint.sign * 600 * synBrushInt() * realDt;
       if (sim.synTerrainBrush === 'ridge') {

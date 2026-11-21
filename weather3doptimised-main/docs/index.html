@@ -157,6 +157,7 @@
         <button data-tab="wx" class="on" title="Weather and synoptic model"><svg viewBox="65 1765 58 38" aria-hidden="true"><path d="M85.9749 1780.28C86.2565 1780.28 86.5374 1780.29 86.8173 1780.31C88.1631 1775.71 91.5716 1772.07 95.9428 1770.37C94.0022 1767.36 90.6294 1765.38 86.7892 1765.38C81.1533 1765.38 76.5158 1769.66 75.9527 1775.15C75.1625 1774.9 74.3227 1774.77 73.453 1774.77C68.7848 1774.77 65 1778.55 65 1783.22C65 1787.89 68.7848 1791.67 73.4529 1791.67H73.5374C74.0939 1785.3 79.4575 1780.28 85.9749 1780.28Z" fill="#000"/><path d="M114.236 1785.1C114.233 1785.1 114.23 1785.1 114.225 1785.1C114.23 1784.95 114.236 1784.81 114.236 1784.66C114.236 1777.64 108.548 1771.95 101.53 1771.95C94.9562 1771.95 89.5482 1776.94 88.8902 1783.35C87.9686 1783.06 86.9906 1782.91 85.9749 1782.91C80.5302 1782.91 76.1164 1787.32 76.1164 1792.77C76.1164 1798.21 80.5302 1802.62 85.9749 1802.62H114.236C119.076 1802.62 123 1798.7 123 1793.86C123 1789.02 119.076 1785.1 114.236 1785.1Z" fill="#000"/></svg>Weather</button>
         <button data-tab="atm" title="Sounding from the probe point or the domain mean">Atmosphere</button>
         <button data-tab="ter" title="World: relief, custom geography, brush and surface">World</button>
+        <button data-tab="synoptic" title="Synoptic terrain editor"><svg viewBox="0 0 24 24" width="24" height="24" style="vertical-align:-4px" aria-hidden="true"><path d="M2 6v16h20V6H12l-3-2.5-3 2.5zM6 13h12v-2H6v2zm2-2V6h8v5h-8z" fill="#000"/></svg>Synoptic</button>
         <button data-tab="view" title="All map layers">Layers</button>
         <button data-tab="mon" title="Climate analysis: months, seasons and years">Climate<br>analysis</button>
         <button data-tab="set" title="Place, date, grid, map overlays, save and load">Settings</button>
@@ -282,7 +283,6 @@
         <div class="seg" id="worldSubTabs">
           <button data-wsub="custom" class="on">Custom world</button>
           <button data-wsub="terrain">Terrain</button>
-          <button data-wsub="synoptic">Synoptic terrain</button>
         </div>
         <div class="world-subpanel" data-wsub="custom">
           <div class="box">
@@ -342,57 +342,59 @@
             </div></details>
           </div>
         </div>
-        <div class="world-subpanel" data-wsub="synoptic" style="display:none">
-          <div class="box">
-            <h4>Synoptic-scale terrain</h4>
-            <div class="hint">Optional full-longitude terrain map for the background model. It starts as a copy of the current local terrain. Left-drag to raise, right-drag to lower; terrain changes restart weather when editing a running simulation.</div>
-            <div class="hint" id="synTerrainCreateHint">Create a separate map to edit background terrain without changing the local terrain.</div>
+      </div>
+
+      <div class="tab" data-panel="synoptic">
+        <div class="thead"><i class="tmark"></i><span class="ttl">Synoptic terrain</span><button class="tclose" title="Close the menu (Esc)">×</button></div>
+        <div class="box">
+          <h4>Synoptic-scale terrain</h4>
+          <div class="hint">Optional full-longitude terrain map for the background model. It starts as a copy of the current local terrain. Left-drag to raise, right-drag to lower; terrain changes restart weather when editing a running simulation.</div>
+          <div class="hint" id="synTerrainCreateHint">Create a separate map to edit background terrain without changing the local terrain.</div>
+          <div class="btns">
+            <button id="synTerrainCreate" class="btn primary" title="Create an independent background terrain map from the current local terrain">Create separate map</button>
+          </div>
+          <canvas id="synTerrainMap" width="400" height="96" aria-label="Synoptic-scale terrain map" style="display:none"></canvas>
+          <div id="synTerrainControls" style="display:none">
+            <label><span class="lbl">Brush radius <b id="synTerrainBrushV">900 km</b></span>
+              <input id="synTerrainBrush" type="range" min="150" max="3000" step="75" value="900" title="Radius of the synoptic terrain brush" /></label>
+            <label class="row"><input id="synPaint" type="checkbox" /> Paint on the map (left button: raise / add, right button: lower / remove)</label>
+            <label><span class="lbl">Paint with</span><select id="synPaintWhat"></select></label>
+            <label><span class="lbl">Brush intensity <b id="synBrushIntV">40 %</b></span>
+              <input id="synBrushInt" type="range" min="5" max="100" step="5" value="40" title="How fast height changes while painting synoptic terrain" /></label>
             <div class="btns">
-              <button id="synTerrainCreate" class="btn primary" title="Create an independent background terrain map from the current local terrain">Create separate map</button>
+              <button id="synTerrainCopy" class="btn" title="Copy the current local terrain over the separate map">Copy local terrain</button>
+              <button id="synTerrainFlat" class="btn" title="Flatten the separate synoptic terrain map">Flatten</button>
             </div>
-            <canvas id="synTerrainMap" width="400" height="96" aria-label="Synoptic-scale terrain map" style="display:none"></canvas>
-            <div id="synTerrainControls" style="display:none">
-              <label><span class="lbl">Brush radius <b id="synTerrainBrushV">900 km</b></span>
-                <input id="synTerrainBrush" type="range" min="150" max="3000" step="75" value="900" title="Radius of the synoptic terrain brush" /></label>
-              <label class="row"><input id="synPaint" type="checkbox" /> Paint on the map (left button: raise / add, right button: lower / remove)</label>
-              <label><span class="lbl">Paint with</span><select id="synPaintWhat"></select></label>
-              <label><span class="lbl">Brush intensity <b id="synBrushIntV">40 %</b></span>
-                <input id="synBrushInt" type="range" min="5" max="100" step="5" value="40" title="How fast height changes while painting synoptic terrain" /></label>
-              <div class="btns">
-                <button id="synTerrainCopy" class="btn" title="Copy the current local terrain over the separate map">Copy local terrain</button>
-                <button id="synTerrainFlat" class="btn" title="Flatten the separate synoptic terrain map">Flatten</button>
-              </div>
-              <div class="hint" style="margin-top:6px">Brush type: <span id="synTerrainBrushType">Normal</span></div>
-              <div class="btns">
-                <button id="synTerrainBrushNormal" class="btn on" title="Soft circular brush (raise/lower)">Normal</button>
-                <button id="synTerrainBrushRidge" class="btn" title="Narrow raised ridge">Ridge</button>
-                <button id="synTerrainBrushValley" class="btn" title="Lowered valley trench">Valley</button>
-                <button id="synTerrainBrushPlateau" class="btn" title="Flat-topped plateau">Plateau</button>
-              </div>
-              <div class="btns" style="margin-top:4px">
-                <button id="synTerrainModeStamp" class="btn" title="One-click stamp at canvas centre">Stamp</button>
-                <button id="synTerrainModePaint" class="btn on" title="Drag to paint continuously">Paint</button>
-              </div>
-              <div class="btns" style="margin-top:4px">
-                <button id="synTerrainUndo" class="btn" disabled title="Undo last terrain stroke (15 steps)">Undo</button>
-                <button id="synTerrainRedo" class="btn" disabled title="Redo last undone stroke">Redo</button>
-              </div>
-              <div id="synTerrainHeight" style="margin-top:6px; font-size:11px; color:var(--muted)">Height: 0 m</div>
-              <div class="btns" style="margin-top:6px">
-                <button id="synTerrainExportPng" class="btn" title="Download terrain as grayscale PNG">Export PNG</button>
-                <button id="synTerrainExportJson" class="btn" title="Download terrain as JSON data">Export JSON</button>
-              </div>
-              <div class="btns" style="margin-top:4px">
-                <button id="synTerrainImportPng" class="btn" title="Load terrain from PNG image">Import PNG</button>
-                <button id="synTerrainImportJson" class="btn" title="Load terrain from JSON file">Import JSON</button>
-              </div>
-              <div class="btns" style="margin-top:6px">
-                <button id="synTerrainRandom" class="btn">Random</button>
-                <button id="synTerrainLoadImg" class="btn">Load image…</button>
-                <button id="synTerrainSaveImg" class="btn">Save PNG</button>
-              </div>
-              <input id="synImgFile" type="file" accept="image/*" hidden />
+            <div class="hint" style="margin-top:6px">Brush type: <span id="synTerrainBrushType">Normal</span></div>
+            <div class="btns">
+              <button id="synTerrainBrushNormal" class="btn on" title="Soft circular brush (raise/lower)">Normal</button>
+              <button id="synTerrainBrushRidge" class="btn" title="Narrow raised ridge">Ridge</button>
+              <button id="synTerrainBrushValley" class="btn" title="Lowered valley trench">Valley</button>
+              <button id="synTerrainBrushPlateau" class="btn" title="Flat-topped plateau">Plateau</button>
             </div>
+            <div class="btns" style="margin-top:4px">
+              <button id="synTerrainModeStamp" class="btn" title="One-click stamp at canvas centre">Stamp</button>
+              <button id="synTerrainModePaint" class="btn on" title="Drag to paint continuously">Paint</button>
+            </div>
+            <div class="btns" style="margin-top:4px">
+              <button id="synTerrainUndo" class="btn" disabled title="Undo last terrain stroke (15 steps)">Undo</button>
+              <button id="synTerrainRedo" class="btn" disabled title="Redo last undone stroke">Redo</button>
+            </div>
+            <div id="synTerrainHeight" style="margin-top:6px; font-size:11px; color:var(--muted)">Height: 0 m</div>
+            <div class="btns" style="margin-top:6px">
+              <button id="synTerrainExportPng" class="btn" title="Download terrain as grayscale PNG">Export PNG</button>
+              <button id="synTerrainExportJson" class="btn" title="Download terrain as JSON data">Export JSON</button>
+            </div>
+            <div class="btns" style="margin-top:4px">
+              <button id="synTerrainImportPng" class="btn" title="Load terrain from PNG image">Import PNG</button>
+              <button id="synTerrainImportJson" class="btn" title="Load terrain from JSON file">Import JSON</button>
+            </div>
+            <div class="btns" style="margin-top:6px">
+              <button id="synTerrainRandom" class="btn">Random</button>
+              <button id="synTerrainLoadImg" class="btn">Load image…</button>
+              <button id="synTerrainSaveImg" class="btn">Save PNG</button>
+            </div>
+            <input id="synImgFile" type="file" accept="image/*" hidden />
           </div>
         </div>
       </div>
